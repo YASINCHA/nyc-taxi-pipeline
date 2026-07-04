@@ -1,0 +1,60 @@
+version: 2
+
+models:
+  - name: daily_taxi_summary
+    description: "Table Gold — résumé quotidien des courses NYC Taxi"
+    columns:
+      - name: trip_date
+        description: "Date de la course"
+        tests:
+          - unique
+          - not_null
+      - name: trip_count
+        description: "Nombre de courses dans la journée"
+        tests:
+          - not_null
+      - name: revenue
+        description: "Revenu total de la journée en dollars"
+        tests:
+          - not_null
+
+  - name: weekly_performance
+    description: "Vue Gold — performance moyenne par jour de la semaine"
+    columns:
+      - name: day_of_week
+        description: "Nom du jour de la semaine"
+        tests:
+          - unique
+          - not_null
+      - name: avg_daily_revenue
+        description: "Revenu moyen par jour de la semaine"
+      - name: avg_daily_trips
+        description: "Nombre moyen de courses par jour de la semaine"
+  - name: top_pickup_zones
+    description: "Gold — Top 20 zones de pickup NYC les plus rentables"
+    columns:
+      - name: pickup_location_id
+        description: "Identifiant de la zone de pickup TLC"
+        tests:
+          - unique
+          - not_null
+      - name: total_revenue
+        description: "Revenu total généré depuis cette zone"
+        tests:
+          - not_null
+      - name: trip_count
+        description: "Nombre total de courses depuis cette zone"
+        tests:
+          - not_null      
+  - name: trip_efficiency
+    description: "Gold — Efficacité des courses par jour (revenu par mile via macro dbt)"
+    columns:
+      - name: trip_date
+        description: "Date de la course"
+        tests:
+          - unique
+          - not_null
+      - name: avg_revenue_per_mile
+        description: "Revenu moyen par mile — calculé via macro revenue_per_mile"
+        tests:
+          - not_null        

@@ -1,0 +1,32 @@
+version: 2
+
+sources:
+  - name: public
+    database: nyc_taxi_dw
+    schema: public
+    description: "Data Warehouse NYC Taxi — tables chargées par Spark"
+
+    tables:
+      - name: final_taxi_data
+        description: "Table Silver — 2.5M courses NYC Taxi nettoyées par Spark"
+        columns:
+          - name: tpep_pickup_datetime
+            description: "Date et heure de prise en charge"
+            tests:
+              - not_null
+          - name: tpep_dropoff_datetime
+            description: "Date et heure de dépose"
+            tests:
+              - not_null
+          - name: total_amount
+            description: "Montant total de la course en dollars"
+            tests:
+              - not_null
+          - name: trip_distance
+            description: "Distance parcourue en miles"
+            tests:
+              - not_null
+          - name: passenger_count
+            description: "Nombre de passagers"
+            tests:
+              - not_null

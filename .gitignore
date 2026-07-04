@@ -1,0 +1,36 @@
+# ==============================================================================
+# .gitignore — NYC Taxi Pipeline
+# ==============================================================================
+
+# Secrets — NE JAMAIS committer ces fichiers
+.env
+*.pem
+*.key
+
+# Données brutes (trop lourdes pour Git)
+*.parquet
+*.csv
+*.json.gz
+
+# Logs Airflow et Spark
+logs/
+*.log
+/tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.Python
+
+# Docker volumes (si montés localement)
+minio_data/
+postgres_data/
+airflow_logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp

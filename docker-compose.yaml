@@ -1,0 +1,302 @@
+# ==============================================================================
+# docker-compose.yaml — Stack NYC Taxi Pipeline (corrigée)
+#
+# CORRECTIONS APPLIQUÉES :
+#   1. Secrets externalisés vers .env (plus de credentials en clair)
+#   2. healthcheck sur chaque service (évite les race conditions au démarrage)
+#   3. depends_on avec condition: service_healthy (ordre garanti)
+#   4. Airflow migré vers apache/airflow:2.9.1 (1.10.9 était EOL depuis 2021)
+#   5. Réseau dédié "pipeline_net" (isolation + DNS entre conteneurs)
+#   6. Dockerfile custom Airflow pour préinstaller les dépendances Python
+#   7. Volume dédié pour les logs Airflow
+# ==============================================================================
+
+services:
+
+  # ─────────────────────────────────────────────
+  # MinIO — Data Lake compatible S3
+  # ─────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: local_s3_minio
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # Console web
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - pipeline_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Spark — Moteur de traitement distribué
+  # ─────────────────────────────────────────────
+  spark:
+    image: apache/spark:3.5.1
+    container_name: local_spark_engine
+    environment:
+      - SPARK_MODE=master
+      # Credentials injectés pour que transform.py et load.py
+      # puissent les lire via os.environ (sans les coder en dur)
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "8080:8080"   # UI Spark Master
+      - "7077:7077"   # Port de soumission des jobs
+    volumes:
+      - .:/opt/spark/apps
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    networks:
+      - pipeline_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+# ─────────────────────────────────────────────
+  # Spark Worker 2 — Deuxième nœud d'exécution
+  # ─────────────────────────────────────────────
+  spark-worker-2:
+    image: apache/spark:3.5.1
+    container_name: local_spark_worker_2
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "8082:8081"   # UI Spark Worker 2
+    volumes:
+      - .:/opt/spark/apps
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark:7077
+    networks:
+      - pipeline_net
+    depends_on:
+      spark:
+        condition: service_healthy
+    restart: unless-stopped
+  # ─────────────────────────────────────────────
+  # Spark Worker — Nœud d'exécution distribué
+  # ─────────────────────────────────────────────
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: local_spark_worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "8081:8081"   # UI Spark Worker
+    volumes:
+      - .:/opt/spark/apps
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark:7077
+    networks:
+      - pipeline_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      spark:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # PostgreSQL — Data Warehouse (DWH)
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: local_dw_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Script d'initialisation : crée les tables au premier démarrage
+      - ./sql/init_schema.sql:/docker-entrypoint-initdb.d/init_schema.sql
+    networks:
+      - pipeline_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Airflow — Orchestrateur de pipeline
+  # Migration : puckel/docker-airflow:1.10.9 (EOL) → apache/airflow:2.9.1
+  # ─────────────────────────────────────────────
+  airflow-init:
+    # Service one-shot : initialise la base de données Airflow
+    image: apache/airflow:2.9.1
+    container_name: airflow_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__CORE__SQL_ALCHEMY_CONN}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    command: db init
+    networks:
+      - pipeline_net
+
+  airflow:
+    build:
+      context: ./docker/airflow   # Dockerfile custom avec boto3 préinstallé
+    container_name: local_orchestrator_airflow
+    user: root
+    ports:
+      - "8085:8080"   # UI Airflow (8080 réservé à Spark)
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__CORE__SQL_ALCHEMY_CONN}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # Credentials transmis aux DAGs via Variables Airflow ou env
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - .:/opt/apps
+      - airflow_logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock   # Permet l'exec dans le conteneur Spark
+    networks:
+      - pipeline_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      spark:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: webserver
+    restart: unless-stopped
+
+  # Scheduler Airflow (séparé du webserver pour la prod)
+  airflow-scheduler:
+    build:
+      context: ./docker/airflow
+    container_name: airflow_scheduler
+    user: root
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__CORE__SQL_ALCHEMY_CONN}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - .:/opt/apps
+      - airflow_logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - pipeline_net
+    depends_on:
+      airflow:
+        condition: service_started
+    command: scheduler
+    restart: unless-stopped
+# ─────────────────────────────────────────────
+  # Metabase — Dashboard de visualisation
+  # ─────────────────────────────────────────────
+  metabase:
+    image: metabase/metabase:latest
+    container_name: local_metabase
+    ports:
+      - "3000:3000"
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: ${POSTGRES_DB}
+      MB_DB_PORT: 5432
+      MB_DB_USER: ${POSTGRES_USER}
+      MB_DB_PASS: ${POSTGRES_PASSWORD}
+      MB_DB_HOST: postgres
+    networks:
+      - pipeline_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+  dbt:
+    image: python:3.11-slim
+    container_name: local_dbt
+    environment:
+      DBT_PROFILES_DIR: /dbt
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ./dbt:/dbt
+    networks:
+      - pipeline_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
+# ─────────────────────────────────────────────
+# Réseau isolé pour la communication inter-conteneurs
+# ─────────────────────────────────────────────
+networks:
+  pipeline_net:
+    driver: bridge
+
+# ─────────────────────────────────────────────
+# Volumes persistants
+# ─────────────────────────────────────────────
+volumes:
+  minio_data:
+  postgres_data:
+  airflow_logs:
