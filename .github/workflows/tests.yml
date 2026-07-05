@@ -1,0 +1,40 @@
+name: CI — Tests unitaires
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  pytest:
+    name: Tests unitaires PySpark
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Java 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: "11"
+          distribution: "temurin"
+
+      - name: Installer les dépendances
+        run: pip install pytest pyspark==3.5.1 psycopg2-binary boto3
+
+      - name: Lancer les tests
+        env:
+          MINIO_ACCESS_KEY: test_key
+          MINIO_SECRET_KEY: test_secret
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+          POSTGRES_DB: test_db
+          PYTHONPATH: .
+        run: python -m pytest tests/test_transform.py -v --tb=short
