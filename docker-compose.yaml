@@ -271,6 +271,8 @@ services:
   dbt:
     image: python:3.11-slim
     container_name: local_dbt
+    ports:
+      - "8501:8501"    # ← Ajouter cette ligne
     environment:
       DBT_PROFILES_DIR: /dbt
       POSTGRES_HOST: postgres
