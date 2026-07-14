@@ -324,6 +324,31 @@ services:
     networks:
       - pipeline_net
     restart: unless-stopped
+# ─────────────────────────────────────────────
+  # MLflow — Tracking des expériences ML
+  # ─────────────────────────────────────────────
+  mlflow:
+    image: python:3.11-slim
+    container_name: local_mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+      - .:/opt/apps
+    command: >
+      bash -c "pip install mlflow psycopg2-binary scikit-learn pandas numpy sqlalchemy &&
+      mlflow server
+      --backend-store-uri postgresql://data_engineer:password123@postgres/mlflow_db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000"
+
+    networks:
+      - pipeline_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
 # ─────────────────────────────────────────────
 # Réseau isolé pour la communication inter-conteneurs
@@ -339,3 +364,5 @@ volumes:
   minio_data:
   postgres_data:
   airflow_logs:
+  mlflow_data:    
+
